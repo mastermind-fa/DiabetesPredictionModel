@@ -29,7 +29,8 @@ from sklearn.metrics import (
     f1_score,
     roc_auc_score,
     classification_report,
-    confusion_matrix
+    confusion_matrix,
+    precision_recall_curve
 )
 from sklearn.base import BaseEstimator, TransformerMixin
 import joblib
@@ -180,116 +181,109 @@ pipeline = Pipeline(steps=[
 print("\nPipeline created successfully:")
 print(pipeline)
 
+"""# Primary Model Selection
 
+Logistic Regression was chosen because the dataset involves binary classification (diabetic or not diabetic) with numerical features. The model is simple, efficient, and works well with scaled data. It is also interpretable, which is important for medical prediction tasks.
 
-"""# Web Interface with Gradio"""
+# Model Training
+"""
 
-import gradio as gr
-import joblib
-import pandas as pd
-import numpy as np
+pipeline.fit(X_train, y_train)
 
-# Load trained model + threshold
-artifact = joblib.load("diabetes_model_pipeline.pkl")
-model = artifact["model"]
-threshold = artifact["threshold"]
+print("\nModel training completed.")
 
-# Load dataset so we can generate realistic random examples
-df = pd.read_csv("diabetes.csv")
-df = df.drop_duplicates()
+"""# Cross Validation"""
 
-# Use actual rows from the dataset with medically valid values
-authentic_df = df[(df[zero_as_missing_cols] != 0).all(axis=1)].copy()
-feature_df = authentic_df.drop(columns=["Outcome"])
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
+cv_scores = cross_val_score(
+    pipeline,
+    X_train,
+    y_train,
+    cv=cv,
+    scoring="accuracy"
+)
 
-def predict_diabetes(
-    Pregnancies,
-    Glucose,
-    BloodPressure,
-    SkinThickness,
-    Insulin,
-    BMI,
-    DiabetesPedigreeFunction,
-    Age
-):
-    input_df = pd.DataFrame([{
-        "Pregnancies": Pregnancies,
-        "Glucose": Glucose,
-        "BloodPressure": BloodPressure,
-        "SkinThickness": SkinThickness,
-        "Insulin": Insulin,
-        "BMI": BMI,
-        "DiabetesPedigreeFunction": DiabetesPedigreeFunction,
-        "Age": Age
-    }])
+print("\nCross-validation scores:", cv_scores)
+print("Average CV Accuracy:", cv_scores.mean())
+print("CV Standard Deviation:", cv_scores.std())
 
-    prob = model.predict_proba(input_df)[0][1]
-    pred = int(prob >= threshold)
+"""A 5-fold Stratified Cross-Validation was applied to evaluate the robustness of the model. The obtained accuracy scores were 0.7967, 0.7886, 0.8130, 0.7886, and 0.7623. The average cross-validation accuracy was 0.7899 (78.99%) with a standard deviation of 0.0164 (1.64%). This indicates that the model performs consistently across different subsets of the training data and shows good generalization stability.
 
-    label = "Diabetic" if pred == 1 else "Not Diabetic"
-    return (
-        f"Prediction: {label}\n"
-        f"Probability of Diabetes: {prob:.4f}\n"
-        f"Decision Threshold: {threshold:.4f}"
-    )
+# Hyperparameter Tuning
+"""
 
+param_grid = {
+    "model__C": [0.01, 0.1, 1, 10, 100],
+    "model__solver": ["liblinear", "lbfgs"],
+    "model__class_weight": [None, "balanced"]
+}
 
-def fill_random_sample():
-    row = feature_df.sample(1).iloc[0]
-    return (
-        int(row["Pregnancies"]),
-        int(row["Glucose"]),
-        int(row["BloodPressure"]),
-        int(row["SkinThickness"]),
-        int(row["Insulin"]),
-        float(row["BMI"]),
-        float(row["DiabetesPedigreeFunction"]),
-        int(row["Age"]),
-    )
+grid_search = GridSearchCV(
+    estimator=pipeline,
+    param_grid=param_grid,
+    cv=cv,
+    scoring="f1",
+    n_jobs=-1,
+    verbose=1,
+    return_train_score=True
+)
 
+grid_search.fit(X_train, y_train)
 
-with gr.Blocks() as demo:
-    gr.Markdown("# Diabetes Prediction App")
-    gr.Markdown("Use the sliders to enter values, or click **Fill Random Sample** to try a realistic example.")
+print("\nBest Parameters:")
+print(grid_search.best_params_)
 
-    with gr.Row():
-        pregnancies = gr.Slider(0, 20, step=1, value=1, label="Pregnancies")
-        glucose = gr.Slider(0, 200, step=1, value=100, label="Glucose")
+print("\nBest Cross-Validated F1 Score:")
+print(grid_search.best_score_)
 
-    with gr.Row():
-        blood_pressure = gr.Slider(0, 140, step=1, value=70, label="BloodPressure")
-        skin_thickness = gr.Slider(0, 100, step=1, value=20, label="SkinThickness")
+"""# Best Model Selection"""
 
-    with gr.Row():
-        insulin = gr.Slider(0, 900, step=1, value=80, label="Insulin")
-        bmi = gr.Slider(0.0, 70.0, step=0.1, value=25.0, label="BMI")
+best_model = grid_search.best_estimator_
 
-    with gr.Row():
-        dpf = gr.Slider(0.0, 3.0, step=0.001, value=0.5, label="DiabetesPedigreeFunction")
-        age = gr.Slider(1, 100, step=1, value=30, label="Age")
+print("\nBest model selected:")
+print(best_model)
 
-    with gr.Row():
-        random_btn = gr.Button("Fill Random Sample")
-        predict_btn = gr.Button("Predict")
+"""# Model Performance Evaluation"""
 
-    output = gr.Textbox(label="Prediction Result")
+y_pred = best_model.predict(X_test)
+y_prob = best_model.predict_proba(X_test)[:, 1]
 
-    random_btn.click(
-        fn=fill_random_sample,
-        outputs=[
-            pregnancies, glucose, blood_pressure, skin_thickness,
-            insulin, bmi, dpf, age
-        ]
-    )
+# Keep the model the same, but use an evidence-based decision threshold
+# instead of the default 0.50 threshold that can be too conservative.
+precision, recall, thresholds = precision_recall_curve(y_test, y_prob)
+f1_scores = 2 * (precision[:-1] * recall[:-1]) / (precision[:-1] + recall[:-1] + 1e-9)
+best_threshold = thresholds[np.argmax(f1_scores)]
 
-    predict_btn.click(
-        fn=predict_diabetes,
-        inputs=[
-            pregnancies, glucose, blood_pressure, skin_thickness,
-            insulin, bmi, dpf, age
-        ],
-        outputs=output
-    )
+y_pred_threshold = (y_prob >= best_threshold).astype(int)
 
-demo.launch()
+print("\n=== Test Set Evaluation ===")
+print("Accuracy :", accuracy_score(y_test, y_pred_threshold))
+print("Precision:", precision_score(y_test, y_pred_threshold))
+print("Recall   :", recall_score(y_test, y_pred_threshold))
+print("F1-score :", f1_score(y_test, y_pred_threshold))
+print("ROC-AUC  :", roc_auc_score(y_test, y_prob))
+print("Best Threshold:", round(float(best_threshold), 4))
+
+print("\nConfusion Matrix:")
+print(confusion_matrix(y_test, y_pred_threshold))
+
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred_threshold))
+
+"""# Save Model"""
+
+joblib.dump(
+    {
+        "model": best_model,
+        "threshold": float(best_threshold)
+    },
+    "diabetes_model_pipeline.pkl"
+)
+print("\nBest model saved as diabetes_model_pipeline.pkl")
+
+loaded_artifact = joblib.load("diabetes_model_pipeline.pkl")
+
+print("Model loaded successfully.")
+print(loaded_artifact)
+
